@@ -59,10 +59,33 @@ def find_spare_parts_page_simple(doc):
     return None
 
 def simple_table_check(text):
-    """Simple check for table content"""
+    """Simple check for table content with debug info"""
     table_indicators = ['NO.', 'PART NO.', 'PART NAME', 'QTY', 'REMARKS']
     count = sum(1 for indicator in table_indicators if indicator in text.upper())
-    return count >= 2
+    
+    # Also check for actual data rows that look like parts tables
+    lines = text.split('\n')
+    data_row_count = 0
+    
+    # Debug: show first few lines
+    print(f"    Checking lines for table data:")
+    for i, line in enumerate(lines[:15]):
+        line = line.strip()
+        if not line:
+            continue
+        print(f"      Line {i+1}: {line[:80]}{'...' if len(line) > 80 else ''}")
+        
+        # Look for lines that start with number and have part numbers
+        if re.match(r'^\d+\s+[A-Z0-9\-]{4,}', line) or \
+           re.match(r'^\d+\.+[A-Z0-9\-]{4,}', line) or \
+           re.match(r'^\d+.*[A-Z0-9\-]{5,}.*[A-Za-z]', line):
+            data_row_count += 1
+            print(f"        ^ This looks like data row #{data_row_count}")
+    
+    # It's a table if we have headers OR multiple data rows
+    is_table = count >= 2 or data_row_count >= 3
+    print(f"    Table check: {count} headers, {data_row_count} data rows -> table={is_table}")
+    return is_table
 
 def extract_spare_parts_basic(doc, page_num, model_name):
     """Basic spare parts extraction"""
@@ -133,22 +156,14 @@ def simple_content_analysis(page):
         return {'has_images': False, 'has_drawings': False, 'is_table': False, 'text_length': 0}
 
 def extract_table_basic(doc, page_num, model_name):
-    """Basic table extraction"""
-    print(f"  Attempting to extract table from page {page_num + 1}")
+    """Basic table extraction - simplified"""
+    print(f"  Extracting table data from page {page_num + 1}")
     
     try:
         page = doc[page_num]
         text = page.get_text()
-        
-        analysis = simple_content_analysis(page)
-        
-        if not analysis['is_table']:
-            print("    No table structure detected")
-            return []
-        
-        print("    Table structure detected, extracting data...")
-        
         lines = text.split('\n')
+        
         table_rows = []
         page_title = ""
         
@@ -159,36 +174,44 @@ def extract_table_basic(doc, page_num, model_name):
                 page_title = line
                 break
         
-        # Extract table rows
+        print(f"    Page title: {page_title}")
+        
+        # Extract table rows - be more aggressive about finding data
         for line in lines:
             line = line.strip()
             if not line or len(line) < 10:
                 continue
             
-            # Skip headers and page info
-            if any(word in line.upper() for word in ['NO.', 'PART NO.', 'PART NAME', 'QTY', 'REMARKS', 'PAGE']):
+            # Skip obvious headers and page info
+            skip_line = any(word in line.upper() for word in [
+                'NO.', 'PART NO.', 'PART NAME', 'QTY', 'REMARKS', 'PAGE', 'MIXER', 'MANUAL', 'REV.'
+            ])
+            
+            if skip_line or line.upper() == page_title.upper():
                 continue
             
-            if line.upper() == page_title.upper():
-                continue
-            
-            # Look for data rows
             row_data = None
             
             # Pattern 1: "1    EM948630    DECAL, PUSH TO STOP    1"
-            parts = re.split(r'\s{2,}', line)
-            if len(parts) >= 3:
-                clean_parts = [p.strip() for p in parts if p.strip()]
-                if len(clean_parts) >= 3 and re.match(r'^\d+$', clean_parts[0]):
-                    row_data = clean_parts
+            if re.match(r'^\d+\s+[A-Z0-9\-]{4,}', line):
+                parts = re.split(r'\s{2,}', line)
+                if len(parts) >= 3:
+                    row_data = [p.strip() for p in parts if p.strip()]
+                    print(f"      Found spaced row: {row_data}")
             
-            # Pattern 2: Dot-separated
-            if not row_data and '...' in line:
+            # Pattern 2: "6............07055-034 .............................V-BELT, 4L340"
+            elif '...' in line and re.match(r'^\d+\.+[A-Z0-9\-]{4,}', line):
                 parts = re.split(r'\.{3,}', line)
+                row_data = [p.strip(' .') for p in parts if p.strip(' .')]
+                print(f"      Found dotted row: {row_data}")
+            
+            # Pattern 3: Any line that starts with digit and has part number pattern
+            elif re.match(r'^\d+', line) and re.search(r'[A-Z0-9\-]{4,}', line):
+                # Try different splitting approaches
+                parts = re.split(r'\.{2,}|\s{3,}', line)
                 if len(parts) >= 2:
-                    clean_parts = [p.strip(' .') for p in parts if p.strip(' .')]
-                    if len(clean_parts) >= 2:
-                        row_data = clean_parts
+                    row_data = [p.strip(' .') for p in parts if p.strip(' .')]
+                    print(f"      Found general row: {row_data}")
             
             if row_data and len(row_data) >= 2:
                 # Pad to 5 columns
@@ -200,37 +223,37 @@ def extract_table_basic(doc, page_num, model_name):
             table_data = {
                 'page': page_num + 1,
                 'model': model_name,
-                'title': page_title or f"Table - Page {page_num + 1}",
+                'title': page_title or f"Parts Table - Page {page_num + 1}",
                 'rows': table_rows
             }
-            print(f"    Extracted {len(table_rows)} table rows")
+            print(f"    ✓ Extracted {len(table_rows)} table rows")
             return [table_data]
+        else:
+            print(f"    ✗ No table rows found")
         
     except Exception as e:
-        print(f"    Error extracting table: {e}")
+        print(f"    ✗ Error extracting table: {e}")
         traceback.print_exc()
     
     return []
 
 def extract_image_basic(page, page_num, model_name, output_folder):
-    """Basic image extraction"""
-    print(f"  Checking page {page_num + 1} for images...")
+    """Basic image extraction - simplified"""
+    print(f"  Extracting images from page {page_num + 1}")
     
     try:
-        analysis = simple_content_analysis(page)
-        
-        # Skip if it's clearly a table
-        if analysis['is_table']:
-            print("    Page is a table - skipping image extraction")
-            return []
-        
         images_folder = Path(output_folder) / "images" / model_name
         images_folder.mkdir(parents=True, exist_ok=True)
         
         extracted_images = []
         
-        # Extract embedded images
+        # Get page characteristics
         image_list = page.get_images()
+        drawings = page.get_drawings()
+        text = page.get_text()
+        text_length = len(text.strip())
+        
+        # Extract embedded images first
         if image_list:
             print(f"    Found {len(image_list)} embedded images")
             
@@ -244,32 +267,42 @@ def extract_image_basic(page, page_num, model_name, output_folder):
                         img_path = images_folder / img_filename
                         pix.save(str(img_path))
                         extracted_images.append(str(img_path))
-                        print(f"      Saved: {img_filename}")
+                        print(f"      ✓ Saved embedded image: {img_filename}")
+                    else:
+                        print(f"      Skipped small image: {pix.width}x{pix.height}")
                     
                     pix = None
                     
                 except Exception as e:
-                    print(f"      Error extracting image {img_index + 1}: {e}")
+                    print(f"      ✗ Error extracting image {img_index + 1}: {e}")
         
-        # Save page as diagram if it has many drawings and little text
-        if analysis['has_drawings'] and analysis['text_length'] < 1000:
+        # Save as diagram if it has significant vector content (relaxed criteria)
+        if len(drawings) > 100:  # Much lower threshold - if it has lots of drawings, it's likely a diagram
+            print(f"    Detected technical diagram: {len(drawings)} drawings, {text_length} chars")
             try:
-                print(f"    Saving page as diagram ({analysis['text_length']} chars, many drawings)")
-                mat = fitz.Matrix(2.0, 2.0)
+                mat = fitz.Matrix(3.0, 3.0)  # High resolution for diagrams
                 pix = page.get_pixmap(matrix=mat)
                 diagram_filename = f"{model_name}_page_{page_num + 1:02d}_diagram.png"
                 diagram_path = images_folder / diagram_filename
                 pix.save(str(diagram_path))
                 extracted_images.append(str(diagram_path))
-                print(f"      Saved diagram: {diagram_filename}")
+                print(f"      ✓ Saved technical diagram: {diagram_filename}")
                 pix = None
             except Exception as e:
-                print(f"      Error saving diagram: {e}")
+                print(f"      ✗ Error saving diagram: {e}")
+        elif len(drawings) > 50:
+            print(f"    Page has {len(drawings)} drawings - might be diagram but below threshold")
+        else:
+            print(f"    Page has only {len(drawings)} drawings - not a diagram")
+        
+        if not extracted_images:
+            print(f"    No images extracted from this page")
         
         return extracted_images
         
     except Exception as e:
-        print(f"    Error processing images: {e}")
+        print(f"    ✗ Error processing images: {e}")
+        traceback.print_exc()
         return []
 
 def process_pdf_simple(pdf_path, output_folder):
@@ -306,27 +339,38 @@ def process_pdf_simple(pdf_path, output_folder):
             spare_parts_data = extract_spare_parts_basic(doc, spare_parts_page, model_name)
             results['spare_parts_data'] = spare_parts_data
             
-            # Process pages after spare parts
+            # Process ALL pages after spare parts (removed limit)
             print(f"\nProcessing pages after spare parts (starting from page {spare_parts_page + 2})...")
             
-            for page_num in range(spare_parts_page + 1, min(len(doc), spare_parts_page + 6)):  # Limit for testing
+            for page_num in range(spare_parts_page + 1, len(doc)):  # Process ALL remaining pages
                 print(f"\n--- Page {page_num + 1} ---")
                 
                 try:
                     page = doc[page_num]
+                    text = page.get_text()
                     
-                    # Analyze content
-                    analysis = simple_content_analysis(page)
+                    # Skip very short pages (likely just notes or page numbers)
+                    if len(text.strip()) < 100:
+                        print(f"  → SKIPPING (too little content: {len(text.strip())} chars)")
+                        continue
                     
-                    # Extract tables
-                    if analysis['is_table']:
-                        print("  Processing as TABLE")
+                    # Check content type ONCE
+                    is_table = simple_table_check(text)
+                    
+                    if is_table:
+                        print("  → PROCESSING AS TABLE")
                         tables = extract_table_basic(doc, page_num, model_name)
                         results['tables'].extend(tables)
                     else:
-                        print("  Processing as potential IMAGE/DIAGRAM")
-                        images = extract_image_basic(page, page_num, model_name, output_folder)
-                        results['images'].extend(images)
+                        print("  → PROCESSING AS IMAGE/DIAGRAM")
+                        # Show content analysis for image pages
+                        images = len(page.get_images())
+                        drawings = len(page.get_drawings())
+                        text_length = len(text.strip())
+                        print(f"    Content: {images} images, {drawings} drawings, {text_length} chars")
+                        
+                        extracted_images = extract_image_basic(page, page_num, model_name, output_folder)
+                        results['images'].extend(extracted_images)
                     
                 except Exception as e:
                     print(f"  ERROR processing page {page_num + 1}: {e}")
@@ -350,7 +394,7 @@ def process_pdf_simple(pdf_path, output_folder):
         return results
 
 def save_results_simple(results, output_folder):
-    """Simple results saving"""
+    """Simple results saving with separate sheets for each table"""
     print(f"\nSaving results...")
     output_folder = Path(output_folder)
     
@@ -365,26 +409,91 @@ def save_results_simple(results, output_folder):
             files_created.append(spare_parts_path)
             print(f"✓ Spare parts saved: {spare_parts_path}")
         
-        # Save tables
+        # Save tables with each table in a separate sheet
         if results['tables']:
             tables_path = output_folder / "tables.xlsx"
             
+            print(f"  Creating Excel file with {len(results['tables'])} separate sheets...")
+            
             with pd.ExcelWriter(tables_path, engine='openpyxl') as writer:
                 for i, table in enumerate(results['tables']):
-                    sheet_name = f"Page_{table['page']}"
-                    if table.get('title'):
-                        # Clean sheet name
-                        clean_title = re.sub(r'[^\w\s]', '', table['title'])[:20]
-                        sheet_name = f"P{table['page']}_{clean_title}"
+                    # Create meaningful sheet name
+                    page_num = table['page']
+                    title = table.get('title', '').strip()
+                    model = table.get('model', 'Unknown')
                     
+                    # Clean up title for sheet name
+                    if title:
+                        # Remove special characters and limit length
+                        clean_title = re.sub(r'[^\w\s]', '', title)
+                        clean_title = re.sub(r'\s+', '_', clean_title)
+                        clean_title = clean_title[:20]  # Limit length
+                        sheet_name = f"{model}_P{page_num}_{clean_title}"
+                    else:
+                        sheet_name = f"{model}_Page_{page_num}"
+                    
+                    # Ensure sheet name is unique and valid
                     if len(sheet_name) > 31:
                         sheet_name = sheet_name[:31]
                     
-                    df = pd.DataFrame(table['rows'])
-                    df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+                    print(f"    Sheet {i+1}: '{sheet_name}' ({len(table['rows'])} rows)")
+                    
+                    # Create DataFrame from table rows
+                    if table['rows']:
+                        # Add headers if available, otherwise use generic column names
+                        max_cols = max(len(row) for row in table['rows']) if table['rows'] else 5
+                        
+                        if table.get('headers') and len(table['headers']) > 0:
+                            # Use provided headers
+                            headers = table['headers'][:max_cols]
+                            # Pad headers if needed
+                            while len(headers) < max_cols:
+                                headers.append(f"Column_{len(headers)+1}")
+                            df = pd.DataFrame(table['rows'], columns=headers)
+                        else:
+                            # Use generic headers
+                            headers = ['NO.', 'PART_NO', 'PART_NAME', 'QTY', 'REMARKS'][:max_cols]
+                            while len(headers) < max_cols:
+                                headers.append(f"Column_{len(headers)+1}")
+                            df = pd.DataFrame(table['rows'], columns=headers)
+                        
+                        # Save to Excel sheet
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                        
+                        # Add some formatting
+                        worksheet = writer.sheets[sheet_name]
+                        
+                        # Auto-adjust column widths
+                        for column in worksheet.columns:
+                            max_length = 0
+                            column_letter = column[0].column_letter
+                            for cell in column:
+                                try:
+                                    if len(str(cell.value)) > max_length:
+                                        max_length = len(str(cell.value))
+                                except:
+                                    pass
+                            adjusted_width = min(max_length + 2, 50)
+                            worksheet.column_dimensions[column_letter].width = adjusted_width
             
             files_created.append(tables_path)
-            print(f"✓ Tables saved: {tables_path}")
+            print(f"✓ Tables saved with separate sheets: {tables_path}")
+        
+        # Save processing summary
+        summary_data = [{
+            'Model': results['model_name'],
+            'Status': results['status'],
+            'Spare_Parts_Count': len(results['spare_parts_data']),
+            'Tables_Count': len(results['tables']),
+            'Images_Count': len(results['images']),
+            'Table_Details': ', '.join([f"Page {t['page']}: {t.get('title', 'Untitled')}" for t in results['tables']])
+        }]
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_path = output_folder / "processing_summary.xlsx"
+        summary_df.to_excel(summary_path, index=False)
+        files_created.append(summary_path)
+        print(f"✓ Processing summary saved: {summary_path}")
         
         return files_created
         
